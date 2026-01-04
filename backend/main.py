@@ -5,13 +5,18 @@ from email import policy
 from email.utils import parseaddr
 import re
 from urllib.parse import urlparse
-from typing import Optional
+from typing import Optional, cast
+
+from db import engine, SessionLocal
+from models import Email, EmailLink
+from sqlalchemy.orm import Session
+
 
 
 app = FastAPI()
 
 
-# -------- CORS (KEEP) -------- #
+# ---------- CORS ---------- #
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -34,7 +39,7 @@ def ping():
     return {"message": "pong"}
 
 
-# -------- Provider Detection -------- #
+# ---------- Provider Detection ---------- #
 def infer_provider(domain: str) -> str:
     domain = domain.lower()
 
@@ -54,7 +59,6 @@ def infer_provider(domain: str) -> str:
     if domain in PROVIDER_MAP:
         return PROVIDER_MAP[domain]
 
-    # fallback: root domain
     if "." in domain:
         parts = domain.split(".")
         root = ".".join(parts[-2:])
@@ -63,7 +67,7 @@ def infer_provider(domain: str) -> str:
     return domain
 
 
-# -------- Link Extraction -------- #
+# ---------- Link Extraction ---------- #
 URL_PATTERN = re.compile(
     r'(https?://[^\s<>"\'\)\]]+)',
     re.IGNORECASE,
@@ -74,35 +78,29 @@ def extract_links(text: str):
     links = []
 
     for match in URL_PATTERN.findall(text or ""):
-        try:
-            parsed = urlparse(match)
-            domain = parsed.netloc.lower()
+        parsed = urlparse(match)
+        domain = parsed.netloc.lower()
 
-            links.append({
-                "url": match,
-                "domain": domain,
-            })
-        except Exception:
-            continue
+        links.append({
+            "url": match,
+            "domain": domain,
+        })
 
     return links
 
 
-# -------- Preview Cleaner (NEW) -------- #
+# ---------- Preview Cleaner ---------- #
 def clean_preview_text(text: str) -> str:
     if not text:
         return ""
 
-    # remove URLs from preview text
     text = re.sub(r'https?://\S+', '', text)
-
-    # collapse repeated whitespace
     text = re.sub(r'\s+', ' ', text).strip()
 
     return text
 
 
-# -------- Category + Intent Rules -------- #
+# ---------- Category + Intent Rules ---------- #
 def classify_email(subject: str, body: str):
     text = f"{subject} {body}".lower()
 
@@ -130,7 +128,7 @@ def classify_email(subject: str, body: str):
     return "notification", "generic_update"
 
 
-# -------- Risk Scoring (Optional-safe) -------- #
+# ---------- Risk Scoring ---------- #
 def compute_risk(
     provider: Optional[str],
     sender_domain: Optional[str],
@@ -146,18 +144,15 @@ def compute_risk(
 
     link_domains = {l["domain"] for l in links}
 
-    # suspicious or mismatched domains
     for d in link_domains:
         if provider and provider not in d and sender_domain not in d:
             risk += 0.25
             flags.append(f"suspicious link: {d}")
 
-    # lots of domains → higher risk
     if len(link_domains) > 3:
         risk += 0.20
         flags.append("multiple external domains")
 
-    # automated mailbox
     if is_noreply:
         risk += 0.05
         flags.append("no-reply sender")
@@ -165,7 +160,48 @@ def compute_risk(
     return round(min(risk, 1.0), 2), flags
 
 
-# -------- Main Parser Endpoint -------- #
+# ---------- Save Email To DB (type-safe) ---------- #
+def save_email_to_db(parsed: dict, body_text: str, links: list) -> int:
+    db: Session = SessionLocal()
+
+    email_row = Email(
+        subject=parsed["subject"],
+        from_raw=parsed["from_raw"],
+        from_name=parsed["from_name"],
+        from_email=parsed["from_email"],
+
+        sender_domain=parsed["sender_domain"],
+        provider=parsed["provider"],
+        is_noreply=parsed["is_noreply"],
+
+        category=parsed["category"],
+        intent=parsed["intent"],
+
+        risk_score=parsed["risk_score"],
+        risk_flags="; ".join(parsed["risk_flags"]),
+
+        preview=parsed["preview"],
+        body=body_text,
+    )
+
+    db.add(email_row)
+    db.flush()  # real int id assigned here
+
+    for link in links:
+        db.add(EmailLink(
+            email_id=email_row.id,
+            url=link["url"],
+            domain=link["domain"],
+        ))
+
+    db.commit()
+    db.refresh(email_row)
+    db.close()
+
+    return cast(int, email_row.id)
+
+
+# ---------- Main Parser Endpoint ---------- #
 @app.post("/parse-email")
 async def parse_email(file: UploadFile = File(...)):
     contents = await file.read()
@@ -175,7 +211,6 @@ async def parse_email(file: UploadFile = File(...)):
     subject = msg["subject"] or ""
     from_raw = msg["from"] or ""
 
-    # --- Parse sender fields --- #
     name, email_addr = parseaddr(from_raw)
     email_addr = email_addr.lower() if email_addr else None
     name = name.strip() if name else None
@@ -191,7 +226,6 @@ async def parse_email(file: UploadFile = File(...)):
         noreply_keywords = ["no-reply", "noreply", "do-not-reply"]
         is_noreply = any(k in email_addr for k in noreply_keywords)
 
-    # --- Extract text body --- #
     body = ""
     if msg.is_multipart():
         for part in msg.walk():
@@ -201,25 +235,21 @@ async def parse_email(file: UploadFile = File(...)):
     else:
         body = msg.get_content()
 
-    # clean preview text (NEW)
     preview_text = clean_preview_text(body)
     preview = preview_text[:200]
 
-    # --- Extract links --- #
     links = extract_links(body)
 
-    # --- Classify email --- #
     category, intent = classify_email(subject, body)
 
-    # --- Risk profile --- #
     risk_score, risk_flags = compute_risk(
         provider,
         sender_domain,
         links,
-        is_noreply
+        is_noreply,
     )
 
-    return {
+    parsed = {
         "subject": subject,
 
         "from_raw": from_raw,
@@ -240,3 +270,9 @@ async def parse_email(file: UploadFile = File(...)):
 
         "preview": preview,
     }
+
+    email_id = save_email_to_db(parsed, body, links)
+
+    parsed["email_id"] = email_id
+
+    return parsed
