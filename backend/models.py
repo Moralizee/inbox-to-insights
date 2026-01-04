@@ -3,8 +3,6 @@ from sqlalchemy.orm import relationship
 from db import Base
 from db import engine
 
-Base.metadata.create_all(bind=engine)
-
 class Email(Base):
     __tablename__ = "emails"
 
@@ -23,12 +21,35 @@ class Email(Base):
     intent = Column(String)
 
     risk_score = Column(Float)
-    risk_flags = Column(Text)   # stored as comma-separated values
+    risk_flags = Column(Text)   # "; " separated
 
     preview = Column(Text)
     body = Column(Text)
 
-    links = relationship("EmailLink", back_populates="email", cascade="all, delete")
+    # ======== NEW Reply / Action Intelligence Fields ========
+
+    requires_reply = Column(Boolean, default=False)
+    action_request = Column(Boolean, default=False)
+
+    # whether the message is assigned to user
+    assigned_to_user = Column(Boolean, default=False)
+
+    # "none" | "medium" | "high"
+    urgency = Column(String, default="none")
+
+    # 0.0 — 1.0 confidence score
+    reply_score = Column(Float, default=0.0)
+
+    # "; " separated explanation flags
+    reply_flags = Column(Text)
+
+    # ========================================================
+
+    links = relationship(
+        "EmailLink",
+        back_populates="email",
+        cascade="all, delete"
+    )
 
 
 class EmailLink(Base):
@@ -41,3 +62,6 @@ class EmailLink(Base):
     domain = Column(String)
 
     email = relationship("Email", back_populates="links")
+
+
+Base.metadata.create_all(bind=engine)

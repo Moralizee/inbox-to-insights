@@ -18,7 +18,6 @@ from models import Email, EmailLink
 
 app = FastAPI()
 
-
 # ---------- CORS ----------
 app.add_middleware(
     CORSMiddleware,
@@ -32,7 +31,7 @@ app.add_middleware(
 )
 
 
-# ---------- DB Session Dependency ----------
+# ---------- DB Session ----------
 def get_db():
     db = SessionLocal()
     try:
@@ -46,129 +45,67 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/ping")
-def ping():
-    return {"message": "pong"}
-
-
 # ======================================================
-#  LIST EMAILS + FILTERS
+#  REQUIRES-REPLY DETECTOR (MVP)
 # ======================================================
-@app.get("/emails")
-def list_emails(
-    db: Session = Depends(get_db),
+REQUIRES_REPLY_KEYWORDS = [
+    "please confirm",
+    "let me know",
+    "can you update",
+    "waiting for your response",
+    "need your approval",
+    "can you review",
+    "follow up",
+]
 
-    q: Optional[str] = None,
-    category: Optional[str] = None,
-    intent: Optional[str] = None,
+ACTION_REQUEST_KEYWORDS = [
+    "send",
+    "upload",
+    "provide",
+    "submit",
+    "attach",
+    "schedule",
+    "approve",
+]
 
-    min_risk: float = 0.0,
-    max_risk: float = 1.0,
-):
-    query = db.query(Email)
+URGENCY_KEYWORDS = [
+    "asap",
+    "urgent",
+    "immediately",
+    "right away",
+    "today",
+]
 
-    # 🔍 text search
-    if q:
-        like = f"%{q}%"
-        query = query.filter(
-            (Email.subject.ilike(like)) |
-            (Email.preview.ilike(like))
-        )
 
-    # 🏷 category filter
-    if category:
-        query = query.filter(Email.category == category)
+def detect_requires_reply(text: str):
+    text = (text or "").lower()
 
-    # 🎯 intent filter
-    if intent:
-        query = query.filter(Email.intent == intent)
+    requires_reply = any(k in text for k in REQUIRES_REPLY_KEYWORDS)
+    action_request = any(k in text for k in ACTION_REQUEST_KEYWORDS)
+    urgency = any(k in text for k in URGENCY_KEYWORDS)
 
-    # ⚠ risk window filter
-    query = query.filter(
-        and_(
-            Email.risk_score >= min_risk,
-            Email.risk_score <= max_risk
-        )
+    score = 0.0
+    flags = []
+
+    if requires_reply:
+        score += 0.4
+        flags.append("reply_requested")
+
+    if action_request:
+        score += 0.3
+        flags.append("action_requested")
+
+    if urgency:
+        score += 0.3
+        flags.append("urgent_language")
+
+    return (
+        requires_reply,
+        action_request,
+        urgency,
+        round(score, 2),
+        flags
     )
-
-    rows: List[Email] = (
-        query
-        .order_by(Email.id.desc())
-        .limit(200)
-        .all()
-    )
-
-    return [
-        {
-            "id": e.id,
-
-            "subject": e.subject,
-
-            "from_name": e.from_name,
-            "from_email": e.from_email,
-
-            "sender_domain": e.sender_domain,
-            "provider": e.provider,
-            "is_noreply": e.is_noreply,
-
-            "category": e.category,
-            "intent": e.intent,
-
-            "risk_score": e.risk_score,
-            "preview": e.preview,
-        }
-        for e in rows
-    ]
-
-
-# ======================================================
-#  EMAIL DETAIL VIEW
-# ======================================================
-@app.get("/emails/{email_id}")
-def get_email(email_id: int, db: Session = Depends(get_db)):
-    email_row = (
-        db.query(Email)
-        .filter(Email.id == email_id)
-        .first()
-    )
-
-    if not email_row:
-        return {"error": "Email not found"}
-
-    risk_flags_str: Optional[str] = cast(Optional[str], email_row.risk_flags)
-
-    links = [
-        {"url": l.url, "domain": l.domain}
-        for l in email_row.links
-    ]
-
-    return {
-        "id": email_row.id,
-
-        "subject": email_row.subject,
-
-        "from_raw": email_row.from_raw,
-        "from_name": email_row.from_name,
-        "from_email": email_row.from_email,
-
-        "sender_domain": email_row.sender_domain,
-        "provider": email_row.provider,
-        "is_noreply": email_row.is_noreply,
-
-        "category": email_row.category,
-        "intent": email_row.intent,
-
-        "risk_score": email_row.risk_score,
-        "risk_flags": (
-            risk_flags_str.split("; ")
-            if risk_flags_str else []
-        ),
-
-        "preview": email_row.preview,
-        "body": email_row.body,
-
-        "links": links,
-    }
 
 
 # ======================================================
@@ -239,20 +176,17 @@ def clean_preview_text(text: str) -> str:
 
 
 # ======================================================
-#  CLASSIFIER (Balanced C Strategy)
+#  CLASSIFIER (C-Strategy)
 # ======================================================
 def classify_email(subject: str, body: str):
-
     text = f"{subject} {body}".lower()
 
     promo_signals = 0
 
     PROMO_KEYWORDS = [
-        "bonus", "reward", "offer", "special offer",
-        "discount", "% off",
+        "bonus", "reward", "offer", "discount",
         "deal", "sale", "promo", "promotion",
-        "free spins", "credits", "win", "exclusive",
-        "redeem", "claim", "expires", "limited time",
+        "free spins", "exclusive", "expires",
     ]
 
     if any(k in text for k in PROMO_KEYWORDS):
@@ -260,18 +194,14 @@ def classify_email(subject: str, body: str):
 
     TRACKING_HINTS = [
         "sendgrid", "mandrill", "mailgun",
-        "trk.", "click.", "email.",
-        "campaign",
+        "trk.", "click.", "campaign",
         "unsubscribe",
     ]
 
     if any(k in text for k in TRACKING_HINTS):
         promo_signals += 1
 
-    if any(x in text for x in [
-        "<table", "<html", "<div", "img src=",
-        "button",
-    ]):
+    if any(x in text for x in ["<table", "img src=", "button"]):
         promo_signals += 1
 
     # Security alerts
@@ -281,24 +211,18 @@ def classify_email(subject: str, body: str):
     ]):
         return "security_alert", "login_security_notice"
 
-    if any(x in text for x in [
-        "allowed access", "granted access", "authorized"
-    ]):
+    if "authorized" in text or "granted access" in text:
         return "security_alert", "account_access_granted"
 
     # Billing
-    if any(x in text for x in [
-        "invoice", "payment", "receipt", "billing"
-    ]):
+    if any(x in text for x in ["invoice", "payment", "receipt", "billing"]):
         return "billing", "transaction_notification"
 
     # Newsletter
-    if any(x in text for x in [
-        "newsletter", "digest", "weekly update"
-    ]):
+    if any(x in text for x in ["newsletter", "digest", "weekly update"]):
         return "newsletter", "content_digest"
 
-    # Promotion (Balanced C threshold)
+    # Promotion
     if promo_signals >= 2:
         return "promotion", "marketing_offer"
 
@@ -308,22 +232,15 @@ def classify_email(subject: str, body: str):
 # ======================================================
 #  RISK SCORING
 # ======================================================
-def compute_risk(
-    provider: Optional[str],
-    sender_domain: Optional[str],
-    links: list,
-    is_noreply: bool,
-) -> tuple[float, list[str]]:
-
+def compute_risk(provider, sender_domain, links, is_noreply):
     provider = (provider or "").lower()
     sender_domain = (sender_domain or "").lower()
 
     risk = 0.0
-    flags: List[str] = []
+    flags = []
 
     link_domains = {l["domain"] for l in links}
 
-    # Domain mismatch warning
     for d in link_domains:
         if provider and provider not in d and sender_domain not in d:
             risk += 0.25
@@ -343,8 +260,7 @@ def compute_risk(
 # ======================================================
 #  SAVE EMAIL
 # ======================================================
-def save_email_to_db(parsed: dict, body_text: str, links: list) -> int:
-
+def save_email_to_db(parsed, body_text, links):
     db: Session = SessionLocal()
 
     email_row = Email(
@@ -356,7 +272,7 @@ def save_email_to_db(parsed: dict, body_text: str, links: list) -> int:
 
         sender_domain=parsed["sender_domain"],
         provider=parsed["provider"],
-        is_noreply=parsed["is_noreply"] or False,
+        is_noreply=parsed["is_noreply"],
 
         category=parsed["category"],
         intent=parsed["intent"],
@@ -366,12 +282,19 @@ def save_email_to_db(parsed: dict, body_text: str, links: list) -> int:
 
         preview=parsed["preview"],
         body=body_text,
-)
+
+        # reply-intelligence
+        requires_reply=parsed["requires_reply"],
+        action_request=parsed["action_request"],
+        urgency=parsed["urgency"],
+        reply_score=parsed["reply_score"],
+        reply_flags="; ".join(parsed["reply_flags"]),
+        assigned_to_user=None,
+    )
 
     db.add(email_row)
-    db.flush()  # assigns ID
+    db.flush()
 
-    # insert links
     for link in links:
         db.add(EmailLink(
             email_id=email_row.id,
@@ -402,18 +325,18 @@ async def parse_email(file: UploadFile = File(...)):
     email_addr = email_addr.lower() if email_addr else None
     name = name.strip() if name else None
 
-    sender_domain: Optional[str] = None
-    provider: Optional[str] = None
+    sender_domain = None
+    provider = None
     is_noreply = False
 
     if email_addr and "@" in email_addr:
         sender_domain = email_addr.split("@")[-1]
         provider = infer_provider(sender_domain)
 
-        noreply_keywords = ["no-reply", "noreply", "do-not-reply"]
-        is_noreply = any(k in email_addr for k in noreply_keywords)
+        is_noreply = any(k in email_addr for k in
+                         ["no-reply", "noreply", "do-not-reply"])
 
-    # ---------- extract body ----------
+    # extract body
     body = ""
     if msg.is_multipart():
         for part in msg.walk():
@@ -436,6 +359,10 @@ async def parse_email(file: UploadFile = File(...)):
         is_noreply,
     )
 
+    # reply detector
+    requires_reply, action_request, urgency, reply_score, reply_flags = \
+        detect_requires_reply(f"{subject}\n{body}")
+
     parsed = {
         "subject": subject,
 
@@ -455,6 +382,12 @@ async def parse_email(file: UploadFile = File(...)):
         "risk_score": risk_score,
         "risk_flags": risk_flags,
 
+        "requires_reply": requires_reply,
+        "action_request": action_request,
+        "urgency": urgency,
+        "reply_score": reply_score,
+        "reply_flags": reply_flags,
+
         "preview": preview,
     }
 
@@ -462,3 +395,118 @@ async def parse_email(file: UploadFile = File(...)):
 
     parsed["email_id"] = email_id
     return parsed
+
+
+# ======================================================
+#  LIST EMAILS
+# ======================================================
+@app.get("/emails")
+def list_emails(
+    db: Session = Depends(get_db),
+    q: Optional[str] = None,
+    category: Optional[str] = None,
+    intent: Optional[str] = None,
+    min_risk: float = 0.0,
+    max_risk: float = 1.0,
+):
+    query = db.query(Email)
+
+    if q:
+        like = f"%{q}%"
+        query = query.filter(
+            (Email.subject.ilike(like)) |
+            (Email.preview.ilike(like))
+        )
+
+    if category:
+        query = query.filter(Email.category == category)
+
+    if intent:
+        query = query.filter(Email.intent == intent)
+
+    query = query.filter(
+        and_(Email.risk_score >= min_risk, Email.risk_score <= max_risk)
+    )
+
+    rows = query.order_by(Email.id.desc()).limit(200).all()
+
+    return [
+        {
+            "id": e.id,
+            "subject": e.subject,
+
+            "from_name": e.from_name,
+            "from_email": e.from_email,
+
+            "sender_domain": e.sender_domain,
+            "provider": e.provider,
+            "is_noreply": e.is_noreply,
+
+            "category": e.category,
+            "intent": e.intent,
+
+            "risk_score": e.risk_score,
+            "preview": e.preview,
+
+            "requires_reply": e.requires_reply,
+            "reply_score": e.reply_score,
+        }
+        for e in rows
+    ]
+
+
+# ======================================================
+#  EMAIL DETAIL VIEW
+# ======================================================
+@app.get("/emails/{email_id}")
+def get_email(email_id: int, db: Session = Depends(get_db)):
+
+    email_row = db.query(Email).filter(Email.id == email_id).first()
+
+    if not email_row:
+        return {"error": "Email not found"}
+
+    links = [{"url": l.url, "domain": l.domain} for l in email_row.links]
+
+    # normalize flag strings safely
+    risk_flags_raw = email_row.risk_flags or ""
+    reply_flags_raw = email_row.reply_flags or ""
+
+    risk_flags = [
+        f for f in risk_flags_raw.split("; ") if f.strip()
+    ] if isinstance(risk_flags_raw, str) else []
+
+    reply_flags = [
+        f for f in reply_flags_raw.split("; ") if f.strip()
+    ] if isinstance(reply_flags_raw, str) else []
+
+    return {
+        "id": email_row.id,
+        "subject": email_row.subject,
+
+        "from_raw": email_row.from_raw,
+        "from_name": email_row.from_name,
+        "from_email": email_row.from_email,
+
+        "sender_domain": email_row.sender_domain,
+        "provider": email_row.provider,
+        "is_noreply": email_row.is_noreply,
+
+        "category": email_row.category,
+        "intent": email_row.intent,
+
+        "risk_score": email_row.risk_score,
+        "risk_flags": risk_flags,
+
+        "preview": email_row.preview,
+        "body": email_row.body,
+
+        "links": links,
+
+        "requires_reply": email_row.requires_reply,
+        "action_request": email_row.action_request,
+        "urgency": email_row.urgency,
+        "reply_score": email_row.reply_score,
+        "reply_flags": reply_flags,
+        "assigned_to_user": email_row.assigned_to_user,
+    }

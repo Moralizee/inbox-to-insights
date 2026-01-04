@@ -18,6 +18,12 @@ interface Email {
   risk_score: number;
   is_noreply: boolean;
 
+  // NEW reply-intelligence fields (list endpoint)
+  requires_reply?: boolean;
+  action_request?: boolean;
+  urgency?: string;
+  reply_score?: number;
+
   preview: string;
 }
 
@@ -29,7 +35,13 @@ interface EmailLink {
 interface EmailDetail extends Email {
   from_raw: string;
   body: string;
-  risk_flags: string[];
+
+  risk_flags?: string[];
+
+  // NEW detail-view reply fields
+  assigned_to_user?: string | null;
+  reply_flags?: string[];
+
   links: EmailLink[];
 }
 
@@ -79,7 +91,6 @@ export default function EmailsDashboard() {
 
   // ---------- Load inspector panel ----------
   async function openEmail(id: number) {
-
     // clicking same row -> do nothing
     if (selectedEmail?.id === id) return;
 
@@ -99,7 +110,7 @@ export default function EmailsDashboard() {
       if (!emails.length) return;
 
       const currentIndex = selectedId
-        ? emails.findIndex(e => e.id === selectedId)
+        ? emails.findIndex((em) => em.id === selectedId)
         : -1;
 
       // ↓ NEXT
@@ -128,21 +139,38 @@ export default function EmailsDashboard() {
 
     window.addEventListener("keydown", handleKeys);
     return () => window.removeEventListener("keydown", handleKeys);
-
   }, [emails, selectedId, selectedEmail]);
+
+  function urgencyBadge(level?: string) {
+    if (!level || level === "none") return null;
+
+    const style =
+      level === "high"
+        ? "bg-red-500/30 text-red-300"
+        : level === "medium"
+        ? "bg-amber-500/30 text-amber-300"
+        : "bg-green-500/30 text-green-300";
+
+    return (
+      <span className={`ml-2 px-2 py-1 rounded ${style}`}>
+        ⏳ {level}
+      </span>
+    );
+  }
+
+  // ---------- Safe flag arrays for the detail panel ----------
+  const replyFlags = selectedEmail?.reply_flags ?? [];
+  const riskFlags = selectedEmail?.risk_flags ?? [];
 
   return (
     <div className="h-screen bg-zinc-950 text-white flex">
-
       {/* ================= LEFT: DASHBOARD ================= */}
       <div className="flex-1 p-6 flex flex-col items-center">
-
         <h1 className="text-2xl font-semibold mb-4">
           Inbox Insights Dashboard
         </h1>
 
         <div className="w-[1100px]">
-
           {/* Filters */}
           <div className="grid grid-cols-4 gap-3 mb-4">
             <input
@@ -215,7 +243,6 @@ export default function EmailsDashboard() {
                   <th className="px-3 py-2 text-left">Category</th>
                   <th className="px-3 py-2 text-left">Risk</th>
                   <th className="px-3 py-2 text-left">From</th>
-                  <th className="px-3 py-2 text-left">Domain</th>
                   <th className="px-3 py-2 text-left">Intent</th>
                   <th className="px-3 py-2 text-left">Subject</th>
                 </tr>
@@ -256,13 +283,23 @@ export default function EmailsDashboard() {
                       </td>
 
                       <td className="px-3 py-2">
-                        {email.sender_domain}
-                      </td>
-
-                      <td className="px-3 py-2">
                         <span className="px-2 py-1 bg-zinc-800 rounded">
                           {email.intent}
                         </span>
+
+                        {email.requires_reply && (
+                          <span className="ml-2 px-2 py-1 rounded bg-blue-500/30 text-blue-300">
+                            📬 Reply
+                          </span>
+                        )}
+
+                        {email.action_request && (
+                          <span className="ml-2 px-2 py-1 rounded bg-amber-500/30 text-amber-300">
+                            🛠 Action
+                          </span>
+                        )}
+
+                        {urgencyBadge(email.urgency)}
                       </td>
 
                       <td className="px-3 py-2 truncate max-w-sm">
@@ -278,7 +315,6 @@ export default function EmailsDashboard() {
 
       {/* ================= RIGHT: FIXED PANEL ================= */}
       <div className="w-[480px] border-l border-zinc-800 bg-zinc-900 p-4 overflow-y-auto">
-
         {!selectedEmail && (
           <div className="opacity-60 text-sm">
             📨 Select an email from the list to view details
@@ -298,7 +334,6 @@ export default function EmailsDashboard() {
               <p>Loading…</p>
             ) : (
               <div className="space-y-3">
-
                 <h2 className="text-lg font-semibold">
                   {selectedEmail.subject}
                 </h2>
@@ -332,13 +367,51 @@ export default function EmailsDashboard() {
                   </span>
                 </div>
 
+                {/* Reply Intelligence */}
+                <div className="flex gap-2 text-sm">
+                  {selectedEmail.requires_reply && (
+                    <span className="px-2 py-1 rounded bg-blue-500/30 text-blue-300">
+                      📬 Reply Expected
+                    </span>
+                  )}
+
+                  {selectedEmail.action_request && (
+                    <span className="px-2 py-1 rounded bg-amber-500/30 text-amber-300">
+                      🛠 Action Requested
+                    </span>
+                  )}
+
+                  {selectedEmail.assigned_to_user && (
+                    <span className="px-2 py-1 rounded bg-purple-500/30 text-purple-300">
+                      👤 Assigned to You
+                    </span>
+                  )}
+
+                  {urgencyBadge(selectedEmail.urgency)}
+                </div>
+
+                {selectedEmail.reply_score !== undefined && (
+                  <p className="text-sm opacity-80">
+                    Reply confidence score:{" "}
+                    <b>{selectedEmail.reply_score}</b>
+                  </p>
+                )}
+
+                {replyFlags.length > 0 && (
+                  <ul className="list-disc ml-4 text-blue-300 text-sm">
+                    {replyFlags.map((f, i) => (
+                      <li key={i}>{f}</li>
+                    ))}
+                  </ul>
+                )}
+
                 <p className="font-semibold">
                   Risk Score: {selectedEmail.risk_score.toFixed(2)}
                 </p>
 
-                {selectedEmail.risk_flags?.length > 0 && (
+                {riskFlags.length > 0 && (
                   <ul className="list-disc ml-4 text-amber-300 text-sm">
-                    {selectedEmail.risk_flags.map((f, i) => (
+                    {riskFlags.map((f, i) => (
                       <li key={i}>{f}</li>
                     ))}
                   </ul>
@@ -382,7 +455,6 @@ export default function EmailsDashboard() {
                     {selectedEmail.body}
                   </pre>
                 </details>
-
               </div>
             )}
           </>
