@@ -1,3 +1,34 @@
+
+===== C:\Users\adrya\inbox-to-insights\backend\db.py =====
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
+
+DATABASE_URL = "sqlite:///./emails.db"
+
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False}
+)
+
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine
+)
+
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+===== C:\Users\adrya\inbox-to-insights\backend\main.py =====
+
 from fastapi import FastAPI, UploadFile, File, Depends
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -462,3 +493,49 @@ async def parse_email(file: UploadFile = File(...)):
 
     parsed["email_id"] = email_id
     return parsed
+
+===== C:\Users\adrya\inbox-to-insights\backend\models.py =====
+
+from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, Text
+from sqlalchemy.orm import relationship
+from db import Base
+from db import engine
+
+Base.metadata.create_all(bind=engine)
+
+class Email(Base):
+    __tablename__ = "emails"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    subject = Column(String)
+    from_raw = Column(String)
+    from_name = Column(String)
+    from_email = Column(String)
+
+    sender_domain = Column(String)
+    provider = Column(String)
+    is_noreply = Column(Boolean, default=False)
+
+    category = Column(String)
+    intent = Column(String)
+
+    risk_score = Column(Float)
+    risk_flags = Column(Text)   # stored as comma-separated values
+
+    preview = Column(Text)
+    body = Column(Text)
+
+    links = relationship("EmailLink", back_populates="email", cascade="all, delete")
+
+
+class EmailLink(Base):
+    __tablename__ = "email_links"
+
+    id = Column(Integer, primary_key=True)
+    email_id = Column(Integer, ForeignKey("emails.id"))
+
+    url = Column(Text)
+    domain = Column(String)
+
+    email = relationship("Email", back_populates="links")
