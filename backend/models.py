@@ -1,49 +1,97 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, Text
-from sqlalchemy.orm import relationship
-from db import Base
-from db import engine
+from sqlalchemy import (
+    Column, Integer, String, Float, Boolean,
+    ForeignKey, Text, DateTime
+)
+from sqlalchemy.orm import relationship, Mapped, mapped_column
+from sqlalchemy.sql import expression
+from datetime import datetime
+
+from db import Base, engine
+
+from typing import Optional
+
 
 class Email(Base):
     __tablename__ = "emails"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
 
-    subject = Column(String)
-    from_raw = Column(String)
-    from_name = Column(String)
-    from_email = Column(String)
+    subject: Mapped[str] = mapped_column(String)
+    from_raw: Mapped[str] = mapped_column(String)
+    from_name: Mapped[str] = mapped_column(String)
+    from_email: Mapped[str] = mapped_column(String)
 
-    sender_domain = Column(String)
-    provider = Column(String)
-    is_noreply = Column(Boolean, default=False)
+    sender_domain: Mapped[str] = mapped_column(String)
+    provider: Mapped[str] = mapped_column(String)
 
-    category = Column(String)
-    intent = Column(String)
+    is_noreply: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=expression.false()
+    )
 
-    risk_score = Column(Float)
-    risk_flags = Column(Text)   # "; " separated
+    category: Mapped[str] = mapped_column(String)
+    intent: Mapped[str] = mapped_column(String)
 
-    preview = Column(Text)
-    body = Column(Text)
+    risk_score: Mapped[float] = mapped_column(Float)
+    risk_flags: Mapped[str] = mapped_column(Text)
 
-    # ======== NEW Reply / Action Intelligence Fields ========
+    preview: Mapped[str] = mapped_column(Text)
+    body: Mapped[str] = mapped_column(Text)
 
-    requires_reply = Column(Boolean, default=False)
-    action_request = Column(Boolean, default=False)
+    # ======== Reply / Action Intelligence ========
 
-    # whether the message is assigned to user
-    assigned_to_user = Column(Boolean, default=False)
+    requires_reply: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=expression.false()
+    )
 
-    # "none" | "medium" | "high"
-    urgency = Column(String, default="none")
+    action_request: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=expression.false()
+    )
 
-    # 0.0 — 1.0 confidence score
-    reply_score = Column(Float, default=0.0)
+    urgency: Mapped[str] = mapped_column(
+        String,
+        default="none",
+        server_default="none"
+    )
 
-    # "; " separated explanation flags
-    reply_flags = Column(Text)
+    reply_score: Mapped[float] = mapped_column(
+        Float,
+        default=0.0,
+        server_default="0"
+    )
 
-    # ========================================================
+    reply_flags: Mapped[str] = mapped_column(Text)
+
+    # ======== Assignment Workflow ========
+
+    status: Mapped[str] = mapped_column(
+        String,
+        default="open",
+        server_default="open"
+    )
+
+    assignee_name: Mapped[str] = mapped_column(
+        String,
+        default="",
+        server_default=""
+    )
+
+    assignee_email: Mapped[str] = mapped_column(
+        String,
+        default="",
+        server_default=""
+    )
+
+    assigned_at: Mapped[Optional[datetime]] = mapped_column(
+    DateTime,
+    nullable=True,
+    default=None
+    )
 
     links = relationship(
         "EmailLink",
@@ -55,11 +103,11 @@ class Email(Base):
 class EmailLink(Base):
     __tablename__ = "email_links"
 
-    id = Column(Integer, primary_key=True)
-    email_id = Column(Integer, ForeignKey("emails.id"))
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email_id: Mapped[int] = mapped_column(ForeignKey("emails.id"))
 
-    url = Column(Text)
-    domain = Column(String)
+    url: Mapped[str] = mapped_column(Text)
+    domain: Mapped[str] = mapped_column(String)
 
     email = relationship("Email", back_populates="links")
 

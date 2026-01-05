@@ -2,6 +2,11 @@
 
 import { useEffect, useState } from "react";
 
+const currentUser = {
+  name: "N Analyst",
+  email: "analyst@corp.local",
+};
+
 interface Email {
   id: number;
   subject: string;
@@ -16,15 +21,14 @@ interface Email {
   intent: string;
 
   risk_score: number;
-  is_noreply: boolean;
+  preview: string;
 
-  // NEW reply-intelligence fields (list endpoint)
   requires_reply?: boolean;
-  action_request?: boolean;
-  urgency?: string;
   reply_score?: number;
 
-  preview: string;
+  status?: "open" | "in_review" | "resolved";
+  assignee_name?: string;
+  assignee_email?: string;
 }
 
 interface EmailLink {
@@ -36,13 +40,14 @@ interface EmailDetail extends Email {
   from_raw: string;
   body: string;
 
-  risk_flags?: string[];
+  links: EmailLink[];
 
-  // NEW detail-view reply fields
-  assigned_to_user?: string | null;
+  risk_flags?: string[];
   reply_flags?: string[];
 
-  links: EmailLink[];
+  action_request?: boolean;
+  urgency?: string;
+  assigned_at?: string | null;
 }
 
 export default function EmailsDashboard() {
@@ -59,11 +64,9 @@ export default function EmailsDashboard() {
     q: "",
     category: "",
     intent: "",
-    min_risk: 0,
-    max_risk: 1,
+    suspicious_only: false,
   });
 
-  // ---------- Load email list ----------
   async function loadEmails() {
     setLoading(true);
 
@@ -72,9 +75,8 @@ export default function EmailsDashboard() {
     if (filters.q) params.append("q", filters.q);
     if (filters.category) params.append("category", filters.category);
     if (filters.intent) params.append("intent", filters.intent);
-
-    params.append("min_risk", String(filters.min_risk));
-    params.append("max_risk", String(filters.max_risk));
+    if (filters.suspicious_only)
+      params.append("suspicious_only", "true");
 
     const res = await fetch(
       `http://127.0.0.1:8000/emails?${params.toString()}`
@@ -89,9 +91,7 @@ export default function EmailsDashboard() {
     loadEmails();
   }, [filters]);
 
-  // ---------- Load inspector panel ----------
   async function openEmail(id: number) {
-    // clicking same row -> do nothing
     if (selectedEmail?.id === id) return;
 
     setSelectedId(id);
@@ -104,361 +104,393 @@ export default function EmailsDashboard() {
     setLoadingDetail(false);
   }
 
-  // ---------- Keyboard navigation (↑ ↓ Enter) ----------
-  useEffect(() => {
-    function handleKeys(e: KeyboardEvent) {
-      if (!emails.length) return;
+  async function assignEmail(id: number) {
+    await fetch(`http://127.0.0.1:8000/emails/${id}/assign`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        assignee_name: currentUser.name,
+        assignee_email: currentUser.email,
+      }),
+    });
 
-      const currentIndex = selectedId
-        ? emails.findIndex((em) => em.id === selectedId)
-        : -1;
+    setSelectedEmail(prev =>
+      prev
+        ? {
+            ...prev,
+            status: "in_review",
+            assignee_name: currentUser.name,
+            assignee_email: currentUser.email,
+          }
+        : prev
+    );
 
-      // ↓ NEXT
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        const next = Math.min(currentIndex + 1, emails.length - 1);
-        const email = emails[next];
-        setSelectedId(email.id);
-        openEmail(email.id);
-      }
+    setEmails(list =>
+      list.map(e =>
+        e.id === id
+          ? {
+              ...e,
+              status: "in_review",
+              assignee_name: currentUser.name,
+              assignee_email: currentUser.email,
+            }
+          : e
+      )
+    );
+  }
 
-      // ↑ PREV
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        const prev = Math.max(currentIndex - 1, 0);
-        const email = emails[prev];
-        setSelectedId(email.id);
-        openEmail(email.id);
-      }
+  async function unassignEmail(id: number) {
+    await fetch(`http://127.0.0.1:8000/emails/${id}/unassign`, {
+      method: "POST",
+    });
 
-      // ENTER → reopen if closed
-      if (e.key === "Enter" && selectedId) {
-        openEmail(selectedId);
-      }
-    }
+    setSelectedEmail(prev =>
+      prev
+        ? {
+            ...prev,
+            status: "open",
+            assignee_name: "",
+            assignee_email: "",
+          }
+        : prev
+    );
 
-    window.addEventListener("keydown", handleKeys);
-    return () => window.removeEventListener("keydown", handleKeys);
-  }, [emails, selectedId, selectedEmail]);
+    setEmails(list =>
+      list.map(e =>
+        e.id === id
+          ? {
+              ...e,
+              status: "open",
+              assignee_name: "",
+              assignee_email: "",
+            }
+          : e
+      )
+    );
+  }
 
-  function urgencyBadge(level?: string) {
-    if (!level || level === "none") return null;
+  async function resolveEmail(id: number) {
+    await fetch(`http://127.0.0.1:8000/emails/${id}/resolve`, {
+      method: "POST",
+    });
 
-    const style =
-      level === "high"
-        ? "bg-red-500/30 text-red-300"
-        : level === "medium"
-        ? "bg-amber-500/30 text-amber-300"
-        : "bg-green-500/30 text-green-300";
+    setSelectedEmail(prev =>
+      prev ? { ...prev, status: "resolved" } : prev
+    );
+
+    setEmails(list =>
+      list.map(e =>
+        e.id === id ? { ...e, status: "resolved" } : e
+      )
+    );
+  }
+
+  const riskFlags = selectedEmail?.risk_flags ?? [];
+  const replyFlags = selectedEmail?.reply_flags ?? [];
+
+  function assignedChip(email: Email) {
+    if (email.status === "resolved")
+      return (
+        <span className="px-2 py-0.5 rounded bg-green-500/20 text-green-300">
+          Resolved
+        </span>
+      );
+
+    if (email.status === "in_review")
+      return (
+        <span className="flex items-center gap-1">
+          <span className="w-2 h-2 rounded-full bg-purple-400" />
+          <span className="text-purple-300">
+            {email.assignee_name || "Assigned"}
+          </span>
+        </span>
+      );
 
     return (
-      <span className={`ml-2 px-2 py-1 rounded ${style}`}>
-        ⏳ {level}
+      <span className="flex items-center gap-1 opacity-70">
+        <span className="w-2 h-2 rounded-full bg-zinc-500" />
+        <span>Unassigned</span>
       </span>
     );
   }
 
-  // ---------- Safe flag arrays for the detail panel ----------
-  const replyFlags = selectedEmail?.reply_flags ?? [];
-  const riskFlags = selectedEmail?.risk_flags ?? [];
+  function riskColor(score: number) {
+    if (score >= 0.6) return "text-red-400";
+    if (score >= 0.3) return "text-amber-300";
+    return "text-green-400";
+  }
 
   return (
-    <div className="h-screen bg-zinc-950 text-white flex">
-      {/* ================= LEFT: DASHBOARD ================= */}
-      <div className="flex-1 p-6 flex flex-col items-center">
-        <h1 className="text-2xl font-semibold mb-4">
-          Inbox Insights Dashboard
-        </h1>
+    <div className="h-screen bg-zinc-950 text-white flex overflow-hidden">
 
-        <div className="w-[1100px]">
-          {/* Filters */}
-          <div className="grid grid-cols-4 gap-3 mb-4">
-            <input
-              className="px-3 py-2 rounded bg-zinc-900 border border-zinc-700"
-              placeholder="Search subject or preview…"
-              value={filters.q}
-              onChange={(e) =>
-                setFilters((f) => ({ ...f, q: e.target.value }))
-              }
-            />
+      {/* LEFT: header + filters */}
+      <div className="flex-1 flex flex-col">
 
-            <select
-              className="px-3 py-2 rounded bg-zinc-900 border border-zinc-700"
-              value={filters.category}
-              onChange={(e) =>
-                setFilters((f) => ({ ...f, category: e.target.value }))
-              }
-            >
-              <option value="">All categories</option>
-              <option value="security_alert">Security Alerts</option>
-              <option value="billing">Billing</option>
-              <option value="newsletter">Newsletters</option>
-              <option value="promotion">Promotions</option>
-            </select>
+        <div className="p-6 pb-3">
+          <h1 className="text-2xl font-semibold mb-4">
+            Inbox Insights Dashboard
+          </h1>
 
-            <select
-              className="px-3 py-2 rounded bg-zinc-900 border border-zinc-700"
-              value={filters.intent}
-              onChange={(e) =>
-                setFilters((f) => ({ ...f, intent: e.target.value }))
-              }
-            >
-              <option value="">All intents</option>
-              <option value="login_security_notice">
-                Login / Security
-              </option>
-              <option value="transaction_notification">
-                Transactions
-              </option>
-              <option value="content_digest">Content Digest</option>
-              <option value="marketing_offer">Marketing Offer</option>
-            </select>
+          <div className="w-[1100px] space-y-3 mx-auto">
+            <div className="flex gap-2">
 
-            <select
-              className="px-3 py-2 rounded bg-zinc-900 border border-zinc-700"
-              onChange={(e) => {
-                const v = e.target.value;
-                if (v === "high")
-                  setFilters((f) => ({ ...f, min_risk: 0.5, max_risk: 1 }));
-                else if (v === "medium")
-                  setFilters((f) => ({ ...f, min_risk: 0.2, max_risk: 0.5 }));
-                else if (v === "low")
-                  setFilters((f) => ({ ...f, min_risk: 0, max_risk: 0.2 }));
-                else
-                  setFilters((f) => ({ ...f, min_risk: 0, max_risk: 1 }));
-              }}
-            >
-              <option value="">All risk levels</option>
-              <option value="high">High risk</option>
-              <option value="medium">Medium risk</option>
-              <option value="low">Low risk</option>
-            </select>
-          </div>
+              <input
+                placeholder="Search subject or preview…"
+                value={filters.q}
+                onChange={e =>
+                  setFilters({ ...filters, q: e.target.value })
+                }
+                className="px-2 py-1 rounded bg-zinc-800 border border-zinc-700 w-[280px]"
+              />
 
-          {/* Table */}
-          <div className="border border-zinc-800 rounded-xl overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-zinc-900 border-b border-zinc-800">
-                <tr>
-                  <th className="px-3 py-2 text-left">Category</th>
-                  <th className="px-3 py-2 text-left">Risk</th>
-                  <th className="px-3 py-2 text-left">From</th>
-                  <th className="px-3 py-2 text-left">Intent</th>
-                  <th className="px-3 py-2 text-left">Subject</th>
-                </tr>
-              </thead>
+              <select
+                value={filters.category}
+                onChange={e =>
+                  setFilters({ ...filters, category: e.target.value })
+                }
+                className="px-2 py-1 rounded bg-zinc-800 border border-zinc-700"
+              >
+                <option value="">All categories</option>
+                <option value="security_alert">Security</option>
+                <option value="billing">Billing</option>
+                <option value="newsletter">Newsletter</option>
+                <option value="promotion">Promotion</option>
+                <option value="notification">Notification</option>
+              </select>
 
-              <tbody>
-                {loading && (
-                  <tr>
-                    <td className="px-3 py-4" colSpan={6}>
-                      Loading…
-                    </td>
-                  </tr>
-                )}
+              <select
+                value={filters.intent}
+                onChange={e =>
+                  setFilters({ ...filters, intent: e.target.value })
+                }
+                className="px-2 py-1 rounded bg-zinc-800 border border-zinc-700"
+              >
+                <option value="">All intents</option>
+                <option value="login_security_notice">
+                  Login alert
+                </option>
+                <option value="account_access_granted">
+                  Access granted
+                </option>
+                <option value="transaction_notification">
+                  Billing notice
+                </option>
+                <option value="marketing_offer">
+                  Marketing
+                </option>
+                <option value="content_digest">
+                  Digest
+                </option>
+              </select>
 
-                {!loading &&
-                  emails.map((email) => (
-                    <tr
-                      key={email.id}
-                      onClick={() => openEmail(email.id)}
-                      className={`
-                        border-b border-zinc-800 cursor-pointer
-                        hover:bg-zinc-900
-                        ${selectedId === email.id ? "bg-zinc-800/70" : ""}
-                      `}
-                    >
-                      <td className="px-3 py-2">
-                        <span className="px-2 py-1 bg-zinc-800 rounded">
-                          {email.category}
-                        </span>
-                      </td>
-
-                      <td className="px-3 py-2 font-mono">
-                        {email.risk_score.toFixed(2)}
-                      </td>
-
-                      <td className="px-3 py-2">
-                        {email.from_email ?? "(unknown)"}
-                      </td>
-
-                      <td className="px-3 py-2">
-                        <span className="px-2 py-1 bg-zinc-800 rounded">
-                          {email.intent}
-                        </span>
-
-                        {email.requires_reply && (
-                          <span className="ml-2 px-2 py-1 rounded bg-blue-500/30 text-blue-300">
-                            📬 Reply
-                          </span>
-                        )}
-
-                        {email.action_request && (
-                          <span className="ml-2 px-2 py-1 rounded bg-amber-500/30 text-amber-300">
-                            🛠 Action
-                          </span>
-                        )}
-
-                        {urgencyBadge(email.urgency)}
-                      </td>
-
-                      <td className="px-3 py-2 truncate max-w-sm">
-                        {email.subject}
-                      </td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={filters.suspicious_only}
+                  onChange={e =>
+                    setFilters({
+                      ...filters,
+                      suspicious_only: e.target.checked,
+                    })
+                  }
+                />
+                Suspicious only
+              </label>
+            </div>
           </div>
         </div>
-      </div>
 
-      {/* ================= RIGHT: FIXED PANEL ================= */}
-      <div className="w-[480px] border-l border-zinc-800 bg-zinc-900 p-4 overflow-y-auto">
-        {!selectedEmail && (
-          <div className="opacity-60 text-sm">
-            📨 Select an email from the list to view details
-          </div>
-        )}
+        {/* TABLE + PANEL layout (aligned top edges) */}
+        <div className="flex-1 overflow-y-auto px-6 pb-4">
 
-        {selectedEmail && (
-          <>
-            <button
-              className="mb-3 px-3 py-1 rounded bg-zinc-800 hover:bg-zinc-700"
-              onClick={() => setSelectedEmail(null)}
-            >
-              Close
-            </button>
+          <div className="flex gap-4 justify-center">
 
-            {loadingDetail ? (
-              <p>Loading…</p>
-            ) : (
-              <div className="space-y-3">
-                <h2 className="text-lg font-semibold">
-                  {selectedEmail.subject}
-                </h2>
+            {/* EMAIL TABLE */}
+            <div className="w-[1100px] border border-zinc-800 rounded-xl overflow-hidden">
+              <table className="w-full text-sm">
 
-                <div className="text-sm opacity-80">
-                  From: {selectedEmail.from_name ?? "(Unknown)"}{" "}
-                  &lt;{selectedEmail.from_email}&gt;
-                </div>
+                <thead className="bg-zinc-900/60 border-b border-zinc-800 sticky top-0 z-10">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Category</th>
+                    <th className="px-3 py-2 text-left w-[160px]">Assigned</th>
+                    <th className="px-3 py-2 text-left">Risk</th>
+                    <th className="px-3 py-2 text-left">Sender</th>
+                    <th className="px-3 py-2 text-left">Intent</th>
+                    <th className="px-3 py-2 text-left">Subject</th>
+                  </tr>
+                </thead>
 
-                <div className="text-sm">
-                  <b>Domain:</b> {selectedEmail.sender_domain}
-                </div>
-
-                <div className="text-sm">
-                  <b>Provider:</b> {selectedEmail.provider}
-                </div>
-
-                {selectedEmail.is_noreply && (
-                  <p className="text-amber-300 text-sm">
-                    ⚠️ System no-reply sender
-                  </p>
-                )}
-
-                <div className="flex gap-2 text-sm pt-1">
-                  <span className="px-2 py-1 bg-zinc-800 rounded">
-                    🏷 {selectedEmail.category}
-                  </span>
-
-                  <span className="px-2 py-1 bg-zinc-800 rounded">
-                    🎯 {selectedEmail.intent}
-                  </span>
-                </div>
-
-                {/* Reply Intelligence */}
-                <div className="flex gap-2 text-sm">
-                  {selectedEmail.requires_reply && (
-                    <span className="px-2 py-1 rounded bg-blue-500/30 text-blue-300">
-                      📬 Reply Expected
-                    </span>
-                  )}
-
-                  {selectedEmail.action_request && (
-                    <span className="px-2 py-1 rounded bg-amber-500/30 text-amber-300">
-                      🛠 Action Requested
-                    </span>
-                  )}
-
-                  {selectedEmail.assigned_to_user && (
-                    <span className="px-2 py-1 rounded bg-purple-500/30 text-purple-300">
-                      👤 Assigned to You
-                    </span>
-                  )}
-
-                  {urgencyBadge(selectedEmail.urgency)}
-                </div>
-
-                {selectedEmail.reply_score !== undefined && (
-                  <p className="text-sm opacity-80">
-                    Reply confidence score:{" "}
-                    <b>{selectedEmail.reply_score}</b>
-                  </p>
-                )}
-
-                {replyFlags.length > 0 && (
-                  <ul className="list-disc ml-4 text-blue-300 text-sm">
-                    {replyFlags.map((f, i) => (
-                      <li key={i}>{f}</li>
-                    ))}
-                  </ul>
-                )}
-
-                <p className="font-semibold">
-                  Risk Score: {selectedEmail.risk_score.toFixed(2)}
-                </p>
-
-                {riskFlags.length > 0 && (
-                  <ul className="list-disc ml-4 text-amber-300 text-sm">
-                    {riskFlags.map((f, i) => (
-                      <li key={i}>{f}</li>
-                    ))}
-                  </ul>
-                )}
-
-                {selectedEmail.links?.length > 0 && (
-                  <div className="pt-2 text-sm">
-                    <b>Links detected:</b>
-                    <ul className="mt-1 space-y-1">
-                      {selectedEmail.links.map((l, i) => (
-                        <li key={i} className="truncate">
-                          🔗{" "}
-                          <a
-                            href={l.url}
-                            target="_blank"
-                            className="text-blue-300 underline"
-                          >
-                            {l.url}
-                          </a>{" "}
-                          <span className="opacity-70">
-                            ({l.domain})
+                <tbody>
+                  {!loading &&
+                    emails.map(email => (
+                      <tr
+                        key={email.id}
+                        onClick={() => openEmail(email.id)}
+                        className={`
+                          border-b border-zinc-800 cursor-pointer
+                          hover:bg-zinc-900
+                          ${selectedId === email.id ? "bg-zinc-800/70" : ""}
+                        `}
+                      >
+                        <td className="px-3 py-2">
+                          <span className="px-2 py-1 bg-zinc-800 rounded">
+                            {email.category}
                           </span>
-                        </li>
-                      ))}
-                    </ul>
+                        </td>
+
+                        <td className="px-3 py-2">
+                          {assignedChip(email)}
+                        </td>
+
+                        <td className="px-3 py-2 font-mono">
+                          <span className={riskColor(email.risk_score)}>
+                            {email.risk_score.toFixed(2)}
+                          </span>
+                        </td>
+
+                        <td className="px-3 py-2">
+                          {email.from_email ?? "(unknown)"}
+                        </td>
+
+                        <td className="px-3 py-2">
+                          <span className="px-2 py-1 bg-zinc-800 rounded">
+                            {email.intent}
+                          </span>
+                        </td>
+
+                        <td className="px-3 py-2 truncate max-w-sm">
+                          {email.subject}
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+
+              </table>
+            </div>
+
+            {/* INSPECTOR PANEL (aligned with header, inset w/ margins) */}
+            <div className="w-[480px] rounded-xl border border-zinc-800 bg-zinc-900
+                            flex flex-col mr-2 mb-2">
+
+              {/* PANEL HEADER */}
+              <div className="p-4 border-b border-zinc-800 flex gap-2">
+
+                {selectedEmail?.status === "open" && (
+                  <button
+                    onClick={() => assignEmail(selectedEmail.id)}
+                    className="px-3 py-1 rounded bg-blue-600 hover:bg-blue-500"
+                  >
+                    📌 Assign for review
+                  </button>
+                )}
+
+                {selectedEmail?.status === "in_review" && (
+                  <>
+                    <button
+                      onClick={() => resolveEmail(selectedEmail.id)}
+                      className="px-3 py-1 rounded bg-green-600 hover:bg-green-500"
+                    >
+                      ✔ Resolve
+                    </button>
+
+                    <button
+                      onClick={() => unassignEmail(selectedEmail.id)}
+                      className="px-3 py-1 rounded bg-zinc-700 hover:bg-zinc-600"
+                    >
+                      ↩ Release assignment
+                    </button>
+                  </>
+                )}
+
+                <button
+                  className="ml-auto px-3 py-1 rounded bg-zinc-800 hover:bg-zinc-700"
+                  onClick={() => setSelectedEmail(null)}
+                >
+                  Close
+                </button>
+              </div>
+
+              {/* PANEL BODY */}
+              <div className="flex-1 overflow-y-auto p-4">
+
+                {!selectedEmail && (
+                  <div className="opacity-60 text-sm">
+                    📨 Select an email to view details
                   </div>
                 )}
 
-                <div className="pt-2">
-                  <b>Preview:</b>
-                  <p className="opacity-80 text-sm">
-                    {selectedEmail.preview}
-                  </p>
-                </div>
+                {selectedEmail && !loadingDetail && (
+                  <div className="space-y-3">
 
-                <details className="pt-2">
-                  <summary className="cursor-pointer">
-                    View full body
-                  </summary>
-                  <pre className="mt-1 whitespace-pre-wrap text-sm opacity-80">
-                    {selectedEmail.body}
-                  </pre>
-                </details>
+                    <h2 className="text-lg font-semibold">
+                      {selectedEmail.subject}
+                    </h2>
+
+                    <div className="text-sm opacity-80">
+                      From: {selectedEmail.from_name ?? "(Unknown)"}{" "}
+                      &lt;{selectedEmail.from_email}&gt;
+                    </div>
+
+                    {selectedEmail.assignee_name && (
+                      <div className="text-sm text-purple-300">
+                        Assigned to: {selectedEmail.assignee_name} —{" "}
+                        {selectedEmail.assignee_email}
+                      </div>
+                    )}
+
+                    <p className="font-semibold">
+                      Risk Score:{" "}
+                      <span className={riskColor(selectedEmail.risk_score)}>
+                        {selectedEmail.risk_score.toFixed(2)}
+                      </span>
+                    </p>
+
+                    {riskFlags.length > 0 && (
+                      <ul className="list-disc ml-4 text-amber-300 text-sm">
+                        {riskFlags.map((f, i) => (
+                          <li key={i}>{f}</li>
+                        ))}
+                      </ul>
+                    )}
+
+                    {selectedEmail.links?.length > 0 && (
+                      <div className="pt-2 text-sm">
+                        <b>Links detected:</b>
+                        <ul className="mt-1 space-y-1">
+                          {selectedEmail.links.map((l, i) => (
+                            <li key={i} className="truncate">
+                              🔗{" "}
+                              <a
+                                href={l.url}
+                                target="_blank"
+                                className="text-blue-300 underline"
+                              >
+                                {l.url}
+                              </a>{" "}
+                              <span className="opacity-70">
+                                ({l.domain})
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    <details className="pt-2">
+                      <summary className="cursor-pointer">
+                        View full body
+                      </summary>
+                      <pre className="mt-1 whitespace-pre-wrap text-sm opacity-80">
+                        {selectedEmail.body}
+                      </pre>
+                    </details>
+                  </div>
+                )}
               </div>
-            )}
-          </>
-        )}
+            </div>
+
+          </div>
+        </div>
       </div>
     </div>
   );

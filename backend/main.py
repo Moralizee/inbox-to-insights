@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Depends
+from fastapi import FastAPI, UploadFile, File, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 import email
@@ -8,6 +8,9 @@ from email.utils import parseaddr
 import re
 from urllib.parse import urlparse
 from typing import Optional, List, cast
+
+from datetime import datetime
+from pydantic import BaseModel
 
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
@@ -46,7 +49,7 @@ def health():
 
 
 # ======================================================
-#  REQUIRES-REPLY DETECTOR (MVP)
+#  REQUIRES-REPLY DETECTOR
 # ======================================================
 REQUIRES_REPLY_KEYWORDS = [
     "please confirm",
@@ -85,7 +88,7 @@ def detect_requires_reply(text: str):
     urgency = any(k in text for k in URGENCY_KEYWORDS)
 
     score = 0.0
-    flags = []
+    flags: List[str] = []
 
     if requires_reply:
         score += 0.4
@@ -139,6 +142,37 @@ def infer_provider(domain: str) -> str:
 
 
 # ======================================================
+#  LINK INTENT CLASSIFIER
+# ======================================================
+SUS_DOMAINS = [
+    "bit.ly", "tinyurl.com", "rb.gy",
+    "lnkd.in", "t.co"
+]
+
+LOGIN_HINTS = ["login", "signin", "verify", "account"]
+BILLING_HINTS = ["billing", "invoice", "payment"]
+UNSUB_HINTS = ["unsubscribe", "optout", "preferences"]
+
+
+def classify_link_intent(url: str, domain: str):
+    url_l = url.lower()
+
+    if any(k in url_l for k in LOGIN_HINTS):
+        return "login"
+
+    if any(k in url_l for k in BILLING_HINTS):
+        return "billing"
+
+    if any(k in url_l for k in UNSUB_HINTS):
+        return "unsubscribe"
+
+    if domain in SUS_DOMAINS:
+            return "redirector"
+
+    return "generic"
+
+
+# ======================================================
 #  LINK EXTRACTION
 # ======================================================
 URL_PATTERN = re.compile(
@@ -157,6 +191,7 @@ def extract_links(text: str):
         links.append({
             "url": match,
             "domain": domain,
+            "intent": classify_link_intent(match, domain),
         })
 
     return links
@@ -176,85 +211,115 @@ def clean_preview_text(text: str) -> str:
 
 
 # ======================================================
-#  CLASSIFIER (C-Strategy)
+#  INTENT CLASSIFIER v2
 # ======================================================
 def classify_email(subject: str, body: str):
     text = f"{subject} {body}".lower()
 
-    promo_signals = 0
+    signals: List[str] = []
+    confidence = 0.5
 
+    def hit(rule, weight, reason):
+        nonlocal confidence
+        if rule:
+            confidence += weight
+            signals.append(reason)
+        return rule
+
+    # SECURITY
+    if hit(any(x in text for x in [
+        "security alert", "new sign-in", "unusual activity",
+        "suspicious", "login attempt"
+    ]), 0.3, "security_keywords"):
+        return "security_alert", "login_security_notice", round(confidence, 2), signals
+
+    if hit(("authorized" in text) or ("granted access" in text),
+           0.2, "access_authorized"):
+        return "security_alert", "account_access_granted", round(confidence, 2), signals
+
+    # BILLING
+    if hit(any(x in text for x in ["invoice", "payment", "receipt", "billing"]),
+           0.25, "billing_terms"):
+        return "billing", "transaction_notification", round(confidence, 2), signals
+
+    # NEWSLETTER
+    if hit(any(x in text for x in ["newsletter", "digest", "weekly update"]),
+           0.2, "newsletter_terms"):
+        return "newsletter", "content_digest", round(confidence, 2), signals
+
+    # PROMOTION
     PROMO_KEYWORDS = [
         "bonus", "reward", "offer", "discount",
         "deal", "sale", "promo", "promotion",
-        "free spins", "exclusive", "expires",
+        "exclusive", "expires"
     ]
 
-    if any(k in text for k in PROMO_KEYWORDS):
-        promo_signals += 1
+    promo_hits = sum(k in text for k in PROMO_KEYWORDS)
 
-    TRACKING_HINTS = [
-        "sendgrid", "mandrill", "mailgun",
-        "trk.", "click.", "campaign",
-        "unsubscribe",
-    ]
+    if promo_hits >= 2:
+        confidence += 0.25
+        signals.append("promo_signals")
+        return "promotion", "marketing_offer", round(confidence, 2), signals
 
-    if any(k in text for k in TRACKING_HINTS):
-        promo_signals += 1
-
-    if any(x in text for x in ["<table", "img src=", "button"]):
-        promo_signals += 1
-
-    # Security alerts
-    if any(x in text for x in [
-        "security alert", "new sign-in", "unusual activity",
-        "suspicious", "login attempt"
-    ]):
-        return "security_alert", "login_security_notice"
-
-    if "authorized" in text or "granted access" in text:
-        return "security_alert", "account_access_granted"
-
-    # Billing
-    if any(x in text for x in ["invoice", "payment", "receipt", "billing"]):
-        return "billing", "transaction_notification"
-
-    # Newsletter
-    if any(x in text for x in ["newsletter", "digest", "weekly update"]):
-        return "newsletter", "content_digest"
-
-    # Promotion
-    if promo_signals >= 2:
-        return "promotion", "marketing_offer"
-
-    return "notification", "generic_update"
+    # DEFAULT
+    return "notification", "generic_update", round(confidence, 2), signals
 
 
 # ======================================================
-#  RISK SCORING
+#  RISK MODEL v2
 # ======================================================
+def domain_root(domain: str):
+    if not domain or "." not in domain:
+        return domain
+    parts = domain.split(".")
+    return ".".join(parts[-2:])
+
+
 def compute_risk(provider, sender_domain, links, is_noreply):
     provider = (provider or "").lower()
     sender_domain = (sender_domain or "").lower()
 
+    sender_root = domain_root(sender_domain)
+
     risk = 0.0
-    flags = []
+    flags: List[str] = []
 
     link_domains = {l["domain"] for l in links}
 
+    # LOOK-ALIKE DOMAINS
     for d in link_domains:
-        if provider and provider not in d and sender_domain not in d:
-            risk += 0.25
-            flags.append(f"suspicious link: {d}")
+        root = domain_root(d)
 
+        if sender_root and root != sender_root and provider not in d:
+            risk += 0.3
+            flags.append(f"lookalike_domain:{d}")
+
+    # MULTI-DOMAIN
     if len(link_domains) > 3:
-        risk += 0.20
-        flags.append("multiple external domains")
+        risk += 0.2
+        flags.append("multiple_external_domains")
 
+    # REDIRECTORS
+    if any(l.get("intent") == "redirector" for l in links):
+        risk += 0.25
+        flags.append("redirector_links_present")
+
+    # LOGIN LINKS
+    if any(l.get("intent") == "login" for l in links):
+        risk += 0.25
+        flags.append("login_link_detected")
+
+    # UNSUBSCRIBE-ONLY
+    if links and all(l.get("intent") == "unsubscribe" for l in links):
+        risk -= 0.2
+        flags.append("unsubscribe_only_links")
+
+    # NO-REPLY
     if is_noreply:
         risk += 0.05
-        flags.append("no-reply sender")
+        flags.append("no_reply_sender")
 
-    return round(min(risk, 1.0), 2), flags
+    return round(max(min(risk, 1.0), 0.0), 2), flags
 
 
 # ======================================================
@@ -266,12 +331,12 @@ def save_email_to_db(parsed, body_text, links):
     email_row = Email(
         subject=parsed["subject"],
 
-        from_raw=parsed["from_raw"],
-        from_name=parsed["from_name"],
-        from_email=parsed["from_email"],
+        from_raw=parsed.get("from_raw") or "",
+        from_name=parsed.get("from_name") or "",
+        from_email=parsed.get("from_email") or "",
 
-        sender_domain=parsed["sender_domain"],
-        provider=parsed["provider"],
+        sender_domain=parsed.get("sender_domain") or "",
+        provider=parsed.get("provider") or "",
         is_noreply=parsed["is_noreply"],
 
         category=parsed["category"],
@@ -283,17 +348,21 @@ def save_email_to_db(parsed, body_text, links):
         preview=parsed["preview"],
         body=body_text,
 
-        # reply-intelligence
         requires_reply=parsed["requires_reply"],
         action_request=parsed["action_request"],
         urgency=parsed["urgency"],
         reply_score=parsed["reply_score"],
         reply_flags="; ".join(parsed["reply_flags"]),
-        assigned_to_user=None,
+
+        status="open",
+        assignee_name="",
+        assignee_email="",
+        assigned_at=None,
     )
 
     db.add(email_row)
     db.flush()
+
 
     for link in links:
         db.add(EmailLink(
@@ -310,12 +379,9 @@ def save_email_to_db(parsed, body_text, links):
 
 
 # ======================================================
-#  PARSE EMAIL UPLOAD
+#  SHARED EMAIL PARSER (used by single + bulk)
 # ======================================================
-@app.post("/parse-email")
-async def parse_email(file: UploadFile = File(...)):
-
-    contents = await file.read()
+def parse_and_store_email_from_bytes(contents: bytes):
     msg = email.message_from_bytes(contents, policy=policy.default)
 
     subject = msg["subject"] or ""
@@ -347,10 +413,10 @@ async def parse_email(file: UploadFile = File(...)):
         body = msg.get_content()
 
     preview = clean_preview_text(body)[:200]
-
     links = extract_links(body)
 
-    category, intent = classify_email(subject, body)
+    category, intent, intent_conf, intent_signals = \
+        classify_email(subject, body)
 
     risk_score, risk_flags = compute_risk(
         provider,
@@ -359,7 +425,6 @@ async def parse_email(file: UploadFile = File(...)):
         is_noreply,
     )
 
-    # reply detector
     requires_reply, action_request, urgency, reply_score, reply_flags = \
         detect_requires_reply(f"{subject}\n{body}")
 
@@ -378,6 +443,8 @@ async def parse_email(file: UploadFile = File(...)):
 
         "category": category,
         "intent": intent,
+        "intent_confidence": intent_conf,
+        "intent_signals": intent_signals,
 
         "risk_score": risk_score,
         "risk_flags": risk_flags,
@@ -392,22 +459,57 @@ async def parse_email(file: UploadFile = File(...)):
     }
 
     email_id = save_email_to_db(parsed, body, links)
-
     parsed["email_id"] = email_id
+
     return parsed
 
 
 # ======================================================
-#  LIST EMAILS
+#  SINGLE EMAIL UPLOAD
+# ======================================================
+@app.post("/parse-email")
+async def parse_email(file: UploadFile = File(...)):
+    contents = await file.read()
+    return parse_and_store_email_from_bytes(contents)
+
+
+# ======================================================
+#  BULK EMAIL UPLOAD
+# ======================================================
+@app.post("/parse-email/bulk")
+async def parse_email_bulk(files: List[UploadFile] = File(...)):
+    results = []
+
+    for file in files:
+        contents = await file.read()
+        parsed = parse_and_store_email_from_bytes(contents)
+        results.append(parsed)
+
+    return {
+        "count": len(results),
+        "items": results
+    }
+
+
+# ======================================================
+#  LIST EMAILS (filters + pagination)
 # ======================================================
 @app.get("/emails")
 def list_emails(
     db: Session = Depends(get_db),
+
     q: Optional[str] = None,
     category: Optional[str] = None,
     intent: Optional[str] = None,
+
     min_risk: float = 0.0,
     max_risk: float = 1.0,
+
+    has_links: Optional[bool] = None,
+    suspicious_only: Optional[bool] = None,
+
+    limit: int = 100,
+    offset: int = 0,
 ):
     query = db.query(Email)
 
@@ -428,7 +530,19 @@ def list_emails(
         and_(Email.risk_score >= min_risk, Email.risk_score <= max_risk)
     )
 
-    rows = query.order_by(Email.id.desc()).limit(200).all()
+    if has_links is True:
+        query = query.join(Email.links).distinct()
+
+    if suspicious_only is True:
+        query = query.filter(Email.risk_score >= 0.5)
+
+    rows = (
+        query
+        .order_by(Email.id.desc())
+        .offset(offset)
+        .limit(min(limit, 500))
+        .all()
+    )
 
     return [
         {
@@ -450,6 +564,10 @@ def list_emails(
 
             "requires_reply": e.requires_reply,
             "reply_score": e.reply_score,
+
+            "status": e.status,
+            "assignee_name": e.assignee_name,
+            "assignee_email": e.assignee_email,
         }
         for e in rows
     ]
@@ -464,21 +582,12 @@ def get_email(email_id: int, db: Session = Depends(get_db)):
     email_row = db.query(Email).filter(Email.id == email_id).first()
 
     if not email_row:
-        return {"error": "Email not found"}
+        raise HTTPException(status_code=404, detail="Email not found")
 
     links = [{"url": l.url, "domain": l.domain} for l in email_row.links]
 
-    # normalize flag strings safely
-    risk_flags_raw = email_row.risk_flags or ""
-    reply_flags_raw = email_row.reply_flags or ""
-
-    risk_flags = [
-        f for f in risk_flags_raw.split("; ") if f.strip()
-    ] if isinstance(risk_flags_raw, str) else []
-
-    reply_flags = [
-        f for f in reply_flags_raw.split("; ") if f.strip()
-    ] if isinstance(reply_flags_raw, str) else []
+    risk_flags = [f for f in (email_row.risk_flags or "").split("; ") if f]
+    reply_flags = [f for f in (email_row.reply_flags or "").split("; ") if f]
 
     return {
         "id": email_row.id,
@@ -508,5 +617,71 @@ def get_email(email_id: int, db: Session = Depends(get_db)):
         "urgency": email_row.urgency,
         "reply_score": email_row.reply_score,
         "reply_flags": reply_flags,
-        "assigned_to_user": email_row.assigned_to_user,
+
+        "status": email_row.status,
+        "assignee_name": email_row.assignee_name,
+        "assignee_email": email_row.assignee_email,
+        "assigned_at": email_row.assigned_at,
     }
+
+
+# ======================================================
+#  ASSIGNMENT WORKFLOW (multi-user)
+# ======================================================
+class AssignRequest(BaseModel):
+    assignee_name: str
+    assignee_email: str
+
+
+@app.post("/emails/{email_id}/assign")
+def assign_email(
+    email_id: int,
+    payload: AssignRequest,
+    db: Session = Depends(get_db)
+):
+
+    email_row = db.query(Email).filter(Email.id == email_id).first()
+    if not email_row:
+        raise HTTPException(status_code=404, detail="Email not found")
+
+    email_row.status = "in_review"
+    email_row.assignee_name = payload.assignee_name
+    email_row.assignee_email = payload.assignee_email
+    email_row.assigned_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(email_row)
+
+    return {"status": "assigned"}
+
+
+@app.post("/emails/{email_id}/unassign")
+def unassign_email(email_id: int, db: Session = Depends(get_db)):
+
+    email_row = db.query(Email).filter(Email.id == email_id).first()
+    if not email_row:
+        raise HTTPException(status_code=404, detail="Email not found")
+
+    email_row.status = "open"
+    email_row.assignee_name = ""
+    email_row.assignee_email = ""
+    email_row.assigned_at = None
+
+    db.commit()
+    db.refresh(email_row)
+
+    return {"status": "unassigned"}
+
+
+@app.post("/emails/{email_id}/resolve")
+def resolve_email(email_id: int, db: Session = Depends(get_db)):
+
+    email_row = db.query(Email).filter(Email.id == email_id).first()
+    if not email_row:
+        raise HTTPException(status_code=404, detail="Email not found")
+
+    email_row.status = "resolved"
+    db.commit()
+    db.refresh(email_row)
+
+    return {"status": "resolved"}
