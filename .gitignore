@@ -55,7 +55,7 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-inbox-to-insights-dump
+inbox-to-insights-dump.txt  
 
 emails.db
 *.sqlite
