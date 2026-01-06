@@ -60,3 +60,7 @@ inbox-to-insights-dump.txt
 emails.db
 *.sqlite
 *.sqlite3
+
+test_gemini.py
+
+.env    

@@ -1,15 +1,10 @@
 "use client";
 
 import { useState } from "react";
-
-type Mode = "single" | "bulk";
+import Link from "next/link";
 
 export default function UploadPage() {
-  const [mode, setMode] = useState<Mode>("single");
-
-  const [file, setFile] = useState<File | null>(null);
   const [files, setFiles] = useState<File[]>([]);
-
   const [result, setResult] = useState<any>(null);
   const [uploading, setUploading] = useState(false);
 
@@ -19,205 +14,145 @@ export default function UploadPage() {
     return "text-green-400";
   }
 
-  // ------------------------------------
-  // SINGLE FILE UPLOAD
-  // ------------------------------------
-  async function handleSingleUpload() {
-    if (!file) return;
+  const resetUpload = () => {
+    setFiles([]);
+    setResult(null);
+  };
 
-    setUploading(true);
-
-    const formData = new FormData();
-    formData.append("file", file);
-
-    const res = await fetch("http://127.0.0.1:8000/parse-email", {
-      method: "POST",
-      body: formData,
-    });
-
-    const data = await res.json();
-    setResult(data);
-    setUploading(false);
-  }
-
-  // ------------------------------------
-  // BULK UPLOAD
-  // ------------------------------------
-  async function handleBulkUpload() {
+  async function handleUpload() {
     if (!files.length) return;
-
     setUploading(true);
 
+    const isBulk = files.length > 1;
     const formData = new FormData();
-    files.forEach(f => formData.append("files", f));
+    const endpoint = isBulk 
+      ? "http://127.0.0.1:8000/parse-email/bulk" 
+      : "http://127.0.0.1:8000/parse-email";
 
-    const res = await fetch("http://127.0.0.1:8000/parse-email/bulk", {
-      method: "POST",
-      body: formData,
-    });
+    if (isBulk) {
+      files.forEach(f => formData.append("files", f));
+    } else {
+      formData.append("file", files[0]);
+    }
 
-    const data = await res.json();
-    setResult(data);
-    setUploading(false);
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        body: formData,
+      });
+      const data = await res.json();
+      setResult(data);
+    } catch (err) {
+      console.error("Upload failed", err);
+    } finally {
+      setUploading(false);
+    }
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center">
-      <div className="bg-zinc-900 p-6 rounded-xl w-[520px]">
-
-        {/* MODE SWITCH */}
-        <div className="flex gap-2 mb-4">
-          <button
-            onClick={() => {
-              setMode("single");
-              setResult(null);
-              setFiles([]);
-            }}
-            className={`px-3 py-1 rounded ${
-              mode === "single"
-                ? "bg-blue-600"
-                : "bg-zinc-700 hover:bg-zinc-600"
-            }`}
-          >
-            Single Email
-          </button>
-
-          <button
-            onClick={() => {
-              setMode("bulk");
-              setResult(null);
-              setFile(null);
-            }}
-            className={`px-3 py-1 rounded ${
-              mode === "bulk"
-                ? "bg-blue-600"
-                : "bg-zinc-700 hover:bg-zinc-600"
-            }`}
-          >
-            Bulk Import
-          </button>
+    <div className="min-h-screen flex items-center justify-center bg-black text-zinc-100 p-4">
+      <div className="bg-zinc-900 border border-zinc-800 p-8 rounded-2xl w-full max-w-[520px] shadow-2xl transition-all">
+        <div className="flex justify-between items-start mb-6">
+          <div>
+            <h1 className="text-2xl font-bold mb-1">Upload Intelligence</h1>
+            <p className="text-xs text-zinc-500 uppercase tracking-widest font-semibold">Manual Test Environment</p>
+          </div>
+          {result && (
+            <button onClick={resetUpload} className="text-zinc-500 hover:text-white text-xs underline underline-offset-4">
+              Clear & Reset
+            </button>
+          )}
         </div>
 
-        {/* ============================ */}
-        {/* SINGLE MODE */}
-        {/* ============================ */}
-        {mode === "single" && (
-          <>
-            <h1 className="text-xl font-semibold mb-2">
-              Upload Email
-            </h1>
+        {/* HIDDEN NATIVE INPUT */}
+        <input
+          id="emailFiles"
+          type="file"
+          multiple
+          className="hidden"
+          accept=".eml,.txt"
+          onChange={(e) => {
+            setFiles(Array.from(e.target.files ?? []));
+            setResult(null);
+          }}
+        />
 
-            <small className="block opacity-70 mb-2">
-              Select an .eml or .txt file to parse
-            </small>
-
-            <input
-              id="emailFile"
-              type="file"
-              className="hidden"
-              accept=".eml,.txt"
-              onChange={e => {
-                setFile(e.target.files?.[0] ?? null);
-                setResult(null);
-              }}
-            />
-
-            <div
-              className="bg-zinc-800 px-3 py-2 rounded mb-3 text-sm cursor-pointer"
-              onClick={() => document.getElementById("emailFile")?.click()}
-            >
-              {file
-                ? <>Selected: {file.name}</>
-                : <span className="opacity-60">Click to choose file</span>}
+        {/* DROPZONE AREA */}
+        <div
+          className={`group border-2 border-dashed p-10 rounded-xl mb-6 text-center cursor-pointer transition-all ${
+            result ? "border-emerald-500/30 bg-emerald-500/5" : "border-zinc-800 hover:border-zinc-600 bg-zinc-950/50"
+          }`}
+          onClick={() => !result && document.getElementById("emailFiles")?.click()}
+        >
+          <div className="text-3xl mb-2 transition-transform group-hover:scale-110">
+            {result ? "✅" : "📂"}
+          </div>
+          {files.length > 0 ? (
+            <div className="space-y-1">
+              <p className={`text-sm font-medium ${result ? "text-emerald-400" : "text-blue-400"}`}>
+                {files.length === 1 ? files[0].name : `${files.length} files processed`}
+              </p>
             </div>
+          ) : (
+            <p className="text-sm text-zinc-500">Click to select .eml files</p>
+          )}
+        </div>
 
-            <button
-              onClick={handleSingleUpload}
-              disabled={!file || uploading}
-              className={`px-4 py-2 rounded ${
-                file
-                  ? "bg-green-500 hover:bg-green-600"
-                  : "bg-green-500/40 cursor-not-allowed"
-              }`}
+        {!result ? (
+          <button
+            onClick={handleUpload}
+            disabled={!files.length || uploading}
+            className={`w-full py-3 rounded-lg font-bold transition-all ${
+              files.length && !uploading
+                ? "bg-white text-black hover:bg-zinc-200"
+                : "bg-zinc-800 text-zinc-500 cursor-not-allowed"
+            }`}
+          >
+            {uploading ? "Analyzing Patterns..." : "Start Analysis"}
+          </button>
+        ) : (
+          <div className="space-y-3">
+            <Link 
+              href="/emails" 
+              className="flex items-center justify-center w-full py-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold transition-all shadow-lg shadow-blue-900/20"
             >
-              {uploading ? "Processing…" : "Parse Email"}
-            </button>
-
-            {result && (
-              <div className="mt-4 bg-black/40 p-3 rounded space-y-2">
-
-                <p><b>Subject:</b> {result.subject}</p>
-
-                <p>
-                  <b>From:</b> {result.from_name ?? "(Unknown)"}{" "}
-                  &lt;{result.from_email}&gt;
-                </p>
-
-                <p><b>Domain:</b> {result.sender_domain}</p>
-                <p><b>Provider:</b> {result.provider}</p>
-
-                <p className={`pt-1 font-semibold ${riskColor(result.risk_score)}`}>
-                  Risk Score: {result.risk_score}
-                </p>
-              </div>
-            )}
-          </>
+              Go to Insights Dashboard →
+            </Link>
+          </div>
         )}
 
-        {/* ============================ */}
-        {/* BULK MODE */}
-        {/* ============================ */}
-        {mode === "bulk" && (
-          <>
-            <h1 className="text-xl font-semibold mb-2">
-              Bulk Email Import
-            </h1>
-
-            <small className="block opacity-70 mb-2">
-              Select multiple .eml files (Shift+Click / Ctrl+Select)
-            </small>
-
-            <input
-              id="bulkFiles"
-              type="file"
-              multiple
-              className="hidden"
-              accept=".eml,.txt"
-              onChange={e => {
-                setFiles(Array.from(e.target.files ?? []));
-                setResult(null);
-              }}
-            />
-
-            <div
-              className="bg-zinc-800 px-3 py-2 rounded mb-3 text-sm cursor-pointer"
-              onClick={() => document.getElementById("bulkFiles")?.click()}
-            >
-              {files.length
-                ? `Selected ${files.length} files`
-                : <span className="opacity-60">Click to choose files</span>}
-            </div>
-
-            <button
-              onClick={handleBulkUpload}
-              disabled={!files.length || uploading}
-              className={`px-4 py-2 rounded ${
-                files.length
-                  ? "bg-green-500 hover:bg-green-600"
-                  : "bg-green-500/40 cursor-not-allowed"
-              }`}
-            >
-              {uploading ? "Processing…" : "Import Emails"}
-            </button>
-
-            {result && (
-              <div className="mt-4 bg-black/40 p-3 rounded">
-                <p>
-                  Imported <b>{result.count}</b> emails successfully
-                </p>
+        {/* RESULT PREVIEW */}
+        {result && (
+          <div className="mt-8 animate-in fade-in zoom-in-95 duration-300">
+            {files.length > 1 ? (
+              <div className="bg-black/40 border border-zinc-800 p-4 rounded-xl flex items-center gap-4">
+                <div className="w-10 h-10 rounded-full bg-emerald-500/10 flex items-center justify-center text-emerald-400 font-bold border border-emerald-500/20">
+                  {result.count}
+                </div>
+                <p className="text-sm text-zinc-400 italic">Emails successfully ingested and parsed by AI.</p>
+              </div>
+            ) : (
+              <div className="bg-black/40 border border-zinc-800 p-5 rounded-xl space-y-3 text-sm">
+                <div className="flex justify-between items-center border-b border-zinc-800 pb-2 mb-2">
+                  <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">Instant Analysis</span>
+                  <span className={`font-mono font-bold ${riskColor(result.risk_score)}`}>
+                    RISK: {result.risk_score.toFixed(2)}
+                  </span>
+                </div>
+                <p className="truncate text-zinc-300"><b className="text-zinc-500 font-medium">SUB:</b> {result.subject}</p>
+                <div className="flex gap-4 pt-2">
+                   <div className="flex-1">
+                     <p className="text-[9px] text-zinc-500 uppercase font-bold">Sender Domain</p>
+                     <p className="truncate text-xs">{result.sender_domain}</p>
+                   </div>
+                   <div className="flex-1 border-l border-zinc-800 pl-4">
+                     <p className="text-[9px] text-zinc-500 uppercase font-bold">Status</p>
+                     <p className="text-xs text-emerald-400 font-bold">Ingested</p>
+                   </div>
+                </div>
               </div>
             )}
-          </>
+          </div>
         )}
       </div>
     </div>
