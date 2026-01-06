@@ -39,6 +39,20 @@ class Email(Base):
     preview: Mapped[str] = mapped_column(Text)
     body: Mapped[str] = mapped_column(Text)
 
+    # ======== AI Intelligence Fields (NEW) ========
+
+    summary: Mapped[Optional[str]] = mapped_column(
+        Text, 
+        nullable=True, 
+        comment="AI-generated summary of the email content"
+    )
+
+    ai_tasks: Mapped[Optional[str]] = mapped_column(
+        Text, 
+        nullable=True, 
+        comment="Semicolon-separated list of extracted action items"
+    )
+
     # ======== Reply / Action Intelligence ========
 
     requires_reply: Mapped[bool] = mapped_column(
@@ -75,22 +89,21 @@ class Email(Base):
         server_default="open"
     )
 
-    assignee_name: Mapped[str] = mapped_column(
-        String,
-        default="",
-        server_default=""
+    assignee_name: Mapped[Optional[str]] = mapped_column(
+        String, 
+        nullable=True, 
+        default=None
     )
-
-    assignee_email: Mapped[str] = mapped_column(
-        String,
-        default="",
-        server_default=""
+    assignee_email: Mapped[Optional[str]] = mapped_column(
+        String, 
+        nullable=True, 
+        default=None
     )
 
     assigned_at: Mapped[Optional[datetime]] = mapped_column(
-    DateTime,
-    nullable=True,
-    default=None
+        DateTime,
+        nullable=True,
+        default=None
     )
 
     links = relationship(
@@ -112,4 +125,5 @@ class EmailLink(Base):
     email = relationship("Email", back_populates="links")
 
 
+# This ensures tables are created when this script is run
 Base.metadata.create_all(bind=engine)
